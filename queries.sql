@@ -1,0 +1,1 @@
+show pg_config;
