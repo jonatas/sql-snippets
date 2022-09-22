@@ -10,6 +10,7 @@ SELECT create_hypertable('ticks', 'time');
 CREATE MATERIALIZED VIEW ohlc_1m
 WITH (timescaledb.continuous) AS
 SELECT time_bucket('1m', time) as bucket,
+SELECT time_bucket('1m', time) as bucket,
           symbol,
           FIRST(price, time) as open,
           MAX(price) as high,

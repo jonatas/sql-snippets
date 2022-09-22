@@ -6,31 +6,45 @@ CREATE TABLE conditions (
       temperature FLOAT NOT NULL
 );
 SELECT * FROM create_hypertable('conditions', 'time');
-ALTER TABLE conditions SET (timescaledb.compress, timescaledb.compress_orderby='time');
 
 INSERT INTO conditions
 SELECT time, (random()*30)::int, random()*80 - 40
 FROM generate_series(TIMESTAMP '2000-01-01 00:00:00',
-                 TIMESTAMP '2000-01-01 00:00:00' + INTERVAL '1 day',
+                 TIMESTAMP '2000-01-21 00:00:00',
              INTERVAL '1 second') AS time;
 
-CREATE OR REPLACE PROCEDURE insert_massive_data(job_id int, config jsonb) LANGUAGE PLPGSQL AS
+SELECT device, min(time), max(time), count(*) from conditions group by 1;
+
+WITH c AS (
+SELECT time, device, ROW_NUMBER() OVER(PARTITION BY device ORDER BY time DESC) AS rank
+FROM conditions )
+SELECT * FROM c where c.rank = 10000;
+
+CREATE OR REPLACE PROCEDURE limit_devices_data(job_id int, config jsonb) LANGUAGE PLPGSQL AS
 $$
 BEGIN
-  RAISE NOTICE 'Inserting in the job % with config %', job_id, config;
-      INSERT INTO conditions
-      WITH latest AS materialized (SELECT time FROM conditions ORDER BY time DESC LIMIT 1 )
-      SELECT a.time, a.device, random()*80 - 40 AS temperature
-      FROM latest LEFT JOIN lateral (
-        SELECT * FROM
-        generate_series(latest.time + INTERVAL '1 second',
-          latest.time + INTERVAL '2 hours', INTERVAL '1 second') AS g1(time),
-        generate_series(1, 300) AS g2(device)
-      ) a ON true;
-  --  END;
-  --  COMMIT;
+  RAISE NOTICE 'DELETING in the job % with config %', job_id, config;
+   WITH summary AS (
+    SELECT time,
+           device,
+           ROW_NUMBER() OVER(PARTITION BY device
+                                 ORDER BY time DESC ) AS rank
+      FROM conditions )
+ DELETE FROM conditions USING summary
+   WHERE summary.rank = 10000 and conditions.time < summary.time and summary.device = conditions.device;
+  COMMIT;
 END
 $$;
 
-SELECT add_job('insert_massive_data','5 seconds', initial_start => now() + INTERVAL '10 seconds');
+SELECT add_job('limit_devices_data','5 seconds', initial_start => now() + INTERVAL '5 seconds');
+SELECT alter_job(job_id, max_runtime =>  INTERVAL '1 minute')
+FROM timescaledb_information.jobs
+WHERE proc_name = 'limit_devices_data';
 
+select pg_sleep(10);
+SELECT * FROM timescaledb_information.job_stats;
+select pg_sleep(10);
+SELECT * FROM timescaledb_information.job_stats;
+
+SELECT device, min(time), max(time), count(*) from conditions group by 1;
+select * from timescaledb_information.jobs where proc_name = 'limit_devices_data';

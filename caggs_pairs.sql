@@ -19,7 +19,7 @@ WITH (timescaledb.continuous) AS
           FROM ticks a
           LEFT JOIN ticks b
           ON time_bucket('1m', a.time) = time_bucket('1m', b.time)
-            AND a.symbol != b.symbol = 'OTHER'
+            AND a.symbol = 'SYMBOL' and b.symbol = 'OTHER'
           GROUP BY 1, 2
 
 WITH DATA;
