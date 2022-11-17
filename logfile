@@ -1,4 +1,0 @@
-2021-10-08 11:11:24.278 -03 [57499] FATAL:  database files are incompatible with server
-2021-10-08 11:11:24.278 -03 [57499] DETAIL:  The data directory was initialized by PostgreSQL version 13, which is not compatible with this version 14.0.
-2021-10-08 11:11:26.530 -03 [57509] FATAL:  database files are incompatible with server
-2021-10-08 11:11:26.530 -03 [57509] DETAIL:  The data directory was initialized by PostgreSQL version 13, which is not compatible with this version 14.0.
