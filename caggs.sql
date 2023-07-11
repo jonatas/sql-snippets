@@ -10,7 +10,6 @@ SELECT create_hypertable('ticks', 'time');
 CREATE MATERIALIZED VIEW ohlc_1m
 WITH (timescaledb.continuous) AS
 SELECT time_bucket('1m', time) as bucket,
-SELECT time_bucket('1m', time) as bucket,
           symbol,
           FIRST(price, time) as open,
           MAX(price) as high,
@@ -36,8 +35,8 @@ TABLE ohlc_1m ORDER BY bucket;
 INSERT INTO ticks
 SELECT time, 'SYMBOL', (random()*30)::int, 100*(random()*10)::int
 FROM generate_series(TIMESTAMP '2000-01-01 00:01:00',
-                 TIMESTAMP '2000-01-01 00:01:00' + INTERVAL '5 minutes',
-             INTERVAL '1 second') AS time;
+                 TIMESTAMP '2000-01-01 00:01:00' + INTERVAL '10 hours',
+             INTERVAL '10 minutes') AS time;
 
 TABLE ohlc_1m ORDER BY bucket;
 
