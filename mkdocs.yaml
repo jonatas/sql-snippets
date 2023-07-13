@@ -1,0 +1,31 @@
+site_name: The Timescaledb gem
+repo_url: https://github.com/jonatas/snippets
+edit_uri: edit/main/docs/
+extra:
+  analytics:
+    provider: google
+    property: TODOLATER
+theme:
+  name: material
+  palette:
+    primary: indigo
+    accent: pink
+markdown_extensions:
+  - admonition
+  - codehilite:
+      guess_lang: false
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+nav:
+  - Checking TimescaleDB Version: available_extensions.md
+  - Bollinger Bands in SQL: bollinger_bands.md
+  - Continuous Aggregates: caggs.md
+  - Continuous Aggregates Cascade: caggs_cascade.md
+  - Continuous Aggregates Cascade Minimal: caggs_cascade_minimal.md
+  - Postgresql + Timescaledb Snippet Walkthrough: 1k_limit.md
+  - Alter Column from Hypertable and Timescaledb: alter_column.md
