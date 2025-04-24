@@ -34,8 +34,7 @@ INSERT INTO swap_events (time, token_address, token_in, token_out, usd_in, usd_o
   ('2025-03-05 14:00:00', '0xabc123', 3.0, 0, 300, 0, '0xuser1'),
   ('2025-03-06 15:00:00', '0xabc123', 0, 2.0, 0, 220, '0xuser1');
 
--- Create a view for realized PnL with FIFO accounting
-CREATE OR REPLACE VIEW swap_fifo_pnl AS
+  CREATE OR REPLACE VIEW swap_fifo_pnl AS
 WITH token_queue AS (
   SELECT
     time,
@@ -46,28 +45,14 @@ WITH token_queue AS (
     token_out,
     usd_in,
     usd_out,
-    SUM(token_in) OVER (
-      PARTITION BY wallet_address, token_address
-      ORDER BY time, id
-      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) - SUM(token_out) OVER (
-      PARTITION BY wallet_address, token_address
-      ORDER BY time, id
-      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS token_balance,
-    SUM(token_in) OVER (
-      PARTITION BY wallet_address, token_address
-      ORDER BY time, id
-    ) AS cumulative_token_in,
-    SUM(token_out) OVER (
-      PARTITION BY wallet_address, token_address
-      ORDER BY time, id
-    ) AS cumulative_token_out,
-    SUM(usd_in) OVER (
-      PARTITION BY wallet_address, token_address
-      ORDER BY time, id
-    ) AS cumulative_usd_in
+    SUM(token_in) OVER w_balance - SUM(token_out) OVER w_balance AS token_balance,
+    SUM(token_in) OVER w_cumulative AS cumulative_token_in,
+    SUM(token_out) OVER w_cumulative AS cumulative_token_out,
+    SUM(usd_in) OVER w_cumulative AS cumulative_usd_in
   FROM swap_events
+  WINDOW
+    w_balance AS (PARTITION BY wallet_address, token_address ORDER BY time, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+    w_cumulative AS (PARTITION BY wallet_address, token_address ORDER BY time, id)
 ),
 fifo_calcs AS (
   SELECT
@@ -87,11 +72,13 @@ fifo_calcs AS (
       WHEN token_out > 0 THEN
         -- Calculate the average cost basis for tokens being sold using FIFO
         usd_out - (token_out * 
-          (LAG(cumulative_usd_in, 1, 0) OVER (PARTITION BY wallet_address, token_address ORDER BY time, id) / 
-           LAG(cumulative_token_in, 1, 1) OVER (PARTITION BY wallet_address, token_address ORDER BY time, id)))
+          (LAG(cumulative_usd_in, 1, 0) OVER w_lag / 
+           LAG(cumulative_token_in, 1, 1) OVER w_lag))
       ELSE 0
     END AS realized_pnl
   FROM token_queue
+  WINDOW
+    w_lag AS (PARTITION BY wallet_address, token_address ORDER BY time, id)
 )
 SELECT
   time,
@@ -103,12 +90,10 @@ SELECT
   usd_out,
   token_balance,
   realized_pnl,
-  SUM(realized_pnl) OVER (
-    PARTITION BY wallet_address, token_address
-    ORDER BY time, id
-    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-  ) AS cumulative_pnl
-FROM fifo_calcs;
+  SUM(realized_pnl) OVER w_cumulative_pnl AS cumulative_pnl
+FROM fifo_calcs
+WINDOW
+  w_cumulative_pnl AS (PARTITION BY wallet_address, token_address ORDER BY time, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW);
 
 -- Create continuous aggregate for real-time metrics
 CREATE MATERIALIZED VIEW IF NOT EXISTS swap_events_hourly WITH (timescaledb.continuous) AS
