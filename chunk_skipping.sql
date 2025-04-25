@@ -30,123 +30,139 @@ SELECT pg_sleep(1);
 -- Now try to enable chunk skipping on the table
 SELECT enable_chunk_skipping('temperature_forecasts', 'forecast_time');
 
--- Insert data for multiple days to create multiple chunks
--- Day 1: Feb 1, 2025
-INSERT INTO temperature_forecasts (time, forecast_time, value)
-VALUES 
-    ('2025-02-01 10:00:00', '2025-02-01 20:30:00', 1.5),
-    ('2025-02-01 10:00:00', '2025-02-01 20:31:00', 3.3),
-    ('2025-02-01 10:00:00', '2025-02-01 20:32:00', 2.8);
+-- Add parameter_id column
+ALTER TABLE temperature_forecasts ADD COLUMN IF NOT EXISTS parameter_id INTEGER DEFAULT 1;
 
--- Day 2: Feb 2, 2025
+-- Create a much larger dataset: 30 days of data, with readings every hour
+-- For each day, we create forecasts every hour for the next 24 hours
+-- This will create approximately 30 days × 24 hours × 24 forecast points = 17,280 rows
+\timing on
+-- First, insert the base forecast data (no parameters yet)
 INSERT INTO temperature_forecasts (time, forecast_time, value)
-VALUES 
-    ('2025-02-02 10:00:00', '2025-02-02 20:30:00', 2.5),
-    ('2025-02-02 10:00:00', '2025-02-02 20:31:00', 4.3),
-    ('2025-02-02 10:00:00', '2025-02-02 20:32:00', 3.8);
+SELECT 
+    -- The time the forecast was made (hourly forecasts)
+    base_date + (forecast_hour || ' hours')::interval AS time,
+    
+    -- The time being forecasted (each forecast predicts 24 hours ahead in hourly increments)
+    base_date + (forecast_hour || ' hours')::interval + (lead_hour || ' hours')::interval AS forecast_time,
+    
+    -- The value: base temperature + day effect + hour effect + random noise
+    15.0 + -- base temperature of 15°C
+    (extract(day from base_date)::integer % 5) + -- 5-day temperature cycle
+    sin(forecast_hour/24.0 * 2 * pi()) * 3 + -- daily cycle (±3°C)
+    random() * 2 - 1 -- random noise ±1°C
+FROM 
+    generate_series('2025-03-01'::date, '2025-04-01'::date, '1 day'::interval) AS base_date,
+    generate_series(0, 23) AS forecast_hour,
+    generate_series(1, 24) AS lead_hour;
 
--- Day 3: Feb 3, 2025
-INSERT INTO temperature_forecasts (time, forecast_time, value)
-VALUES 
-    ('2025-02-03 10:00:00', '2025-02-03 20:30:00', 3.5),
-    ('2025-02-03 10:00:00', '2025-02-03 20:31:00', 5.3),
-    ('2025-02-03 10:00:00', '2025-02-03 20:32:00', 4.8);
+-- Now insert multi-parameter data: temperature, humidity, wind speed, and pressure
+-- Each forecast will include 4 different parameters
+INSERT INTO temperature_forecasts (time, forecast_time, value, parameter_id)
+SELECT 
+    -- Same forecast times as before, but every 3 hours instead of every hour
+    base_date + (forecast_hour * 3 || ' hours')::interval AS time,
+    base_date + (forecast_hour * 3 || ' hours')::interval + (lead_hour * 3 || ' hours')::interval AS forecast_time,
+    
+    -- Different values based on parameter type
+    CASE 
+        WHEN parameter_id = 1 THEN -- Temperature (°C)
+            15.0 + (extract(day from base_date)::integer % 5) + sin(forecast_hour/8.0 * 2 * pi()) * 3 + random() * 2 - 1
+            
+        WHEN parameter_id = 2 THEN -- Humidity (%)
+            60.0 + (extract(day from base_date)::integer % 7) * 2 + cos(forecast_hour/8.0 * 2 * pi()) * 10 + random() * 5
+            
+        WHEN parameter_id = 3 THEN -- Wind speed (m/s)
+            5.0 + (extract(day from base_date)::integer % 4) + sin(forecast_hour/6.0 * 2 * pi()) * 2 + random() * 3
+            
+        WHEN parameter_id = 4 THEN -- Pressure (hPa)
+            1013.0 + (extract(day from base_date)::integer % 10) + cos(forecast_hour/12.0 * 2 * pi()) * 5 + random() * 2
+    END AS value,
+    parameter_id
+FROM 
+    generate_series('2025-02-01'::date, '2025-03-02'::date, '1 day'::interval) AS base_date,
+    generate_series(0, 7) AS forecast_hour, -- 8 forecasts per day (every 3 hours)
+    generate_series(0, 7) AS lead_hour,    -- 8 lead times (covering 24 hours)
+    generate_series(1, 4) AS parameter_id;  -- 4 parameters
 
--- Day 4: Feb 4, 2025
-INSERT INTO temperature_forecasts (time, forecast_time, value)
-VALUES 
-    ('2025-02-04 10:00:00', '2025-02-04 20:30:00', 4.5),
-    ('2025-02-04 10:00:00', '2025-02-04 20:31:00', 6.3),
-    ('2025-02-04 10:00:00', '2025-02-04 20:32:00', 5.8);
-
--- Day 5: Feb 5, 2025
-INSERT INTO temperature_forecasts (time, forecast_time, value)
-VALUES 
-    ('2025-02-05 10:00:00', '2025-02-05 20:30:00', 5.5),
-    ('2025-02-05 10:00:00', '2025-02-05 20:31:00', 7.3),
-    ('2025-02-05 10:00:00', '2025-02-05 20:32:00', 6.8);
+-- Show how many rows we created
+SELECT count(*) FROM temperature_forecasts;
 
 -- Show the chunks that were created
 SELECT show_chunks('temperature_forecasts');
 
--- Add parameter_id column
-ALTER TABLE temperature_forecasts ADD COLUMN IF NOT EXISTS parameter_id INTEGER DEFAULT 1;
+-- Create hypertable statistics to optimize query planning
+ANALYZE temperature_forecasts;
 
--- Insert some multi-parameter data for multiple days
-INSERT INTO temperature_forecasts (time, forecast_time, value, parameter_id)
-VALUES 
-    -- Day 1 parameter data
-    ('2025-02-01 10:02:00', '2025-02-01 20:30:00', 1.7, 1), -- Temperature
-    ('2025-02-01 10:02:00', '2025-02-01 20:30:00', 60.0, 2), -- Humidity
-    
-    -- Day 2 parameter data
-    ('2025-02-02 10:02:00', '2025-02-02 20:30:00', 2.7, 1), 
-    ('2025-02-02 10:02:00', '2025-02-02 20:30:00', 65.0, 2),
-    
-    -- Day 3 parameter data
-    ('2025-02-03 10:02:00', '2025-02-03 20:30:00', 3.7, 1), 
-    ('2025-02-03 10:02:00', '2025-02-03 20:30:00', 70.0, 2),
-    
-    -- Day 4 parameter data
-    ('2025-02-04 10:02:00', '2025-02-04 20:30:00', 4.7, 1), 
-    ('2025-02-04 10:02:00', '2025-02-04 20:30:00', 75.0, 2),
-    
-    -- Day 5 parameter data
-    ('2025-02-05 10:02:00', '2025-02-05 20:30:00', 5.7, 1), 
-    ('2025-02-05 10:02:00', '2025-02-05 20:30:00', 80.0, 2);
-
--- QUERY 1: Show chunk skipping in action by querying only Feb 2-3
--- This should skip Feb 1, 4, and 5 chunks
+-- QUERY 1: Show chunk skipping in action by querying only a specific date range
+-- Observe execution time with chunk skipping enabled
 EXPLAIN ANALYZE
 WITH latest_forecasts AS (
     SELECT DISTINCT ON (forecast_time) 
         forecast_time,
         value
     FROM temperature_forecasts
-    WHERE forecast_time BETWEEN '2025-02-02 00:00:00' AND '2025-02-03 23:59:59'
+    WHERE 
+        forecast_time BETWEEN '2025-02-15 00:00:00' AND '2025-02-16 23:59:59' AND
+        parameter_id = 1
     ORDER BY forecast_time, time DESC
 )
 SELECT * FROM latest_forecasts ORDER BY forecast_time;
 
--- QUERY 2: Show chunk skipping when querying with parameter_id
-EXPLAIN ANALYZE
-WITH latest_forecasts AS (
-    SELECT DISTINCT ON (forecast_time, parameter_id) 
-        forecast_time,
-        parameter_id,
-        value
-    FROM temperature_forecasts
-    WHERE 
-        forecast_time BETWEEN '2025-02-02 00:00:00' AND '2025-02-03 23:59:59' AND
-        parameter_id = 1
-    ORDER BY forecast_time, parameter_id, time DESC
-)
-SELECT * FROM latest_forecasts ORDER BY forecast_time;
-
+-- Disable chunk skipping to compare performance
 SELECT disable_chunk_skipping('temperature_forecasts', 'forecast_time');
 
+-- Run the same query with chunk skipping disabled
 EXPLAIN ANALYZE
 WITH latest_forecasts AS (
     SELECT DISTINCT ON (forecast_time) 
         forecast_time,
         value
     FROM temperature_forecasts
-    WHERE forecast_time BETWEEN '2025-02-02 00:00:00' AND '2025-02-03 23:59:59'
+    WHERE 
+        forecast_time BETWEEN '2025-02-15 00:00:00' AND '2025-02-16 23:59:59' AND
+        parameter_id = 1
     ORDER BY forecast_time, time DESC
 )
 SELECT * FROM latest_forecasts ORDER BY forecast_time;
 
--- QUERY 2: Show chunk skipping when querying with parameter_id
+-- Re-enable chunk skipping for further tests
+SELECT enable_chunk_skipping('temperature_forecasts', 'forecast_time');
+
+-- Test a more complex query that gets statistics for multiple parameters
 EXPLAIN ANALYZE
-WITH latest_forecasts AS (
-    SELECT DISTINCT ON (forecast_time, parameter_id) 
-        forecast_time,
-        parameter_id,
-        value
-    FROM temperature_forecasts
-    WHERE 
-        forecast_time BETWEEN '2025-02-02 00:00:00' AND '2025-02-03 23:59:59' AND
-        parameter_id = 1
-    ORDER BY forecast_time, parameter_id, time DESC
-)
-SELECT * FROM latest_forecasts ORDER BY forecast_time;
+SELECT 
+    date_trunc('day', forecast_time) AS day,
+    parameter_id,
+    avg(value) AS avg_value,
+    min(value) AS min_value,
+    max(value) AS max_value,
+    stddev(value) AS stddev_value,
+    count(*) AS count
+FROM temperature_forecasts
+WHERE 
+    forecast_time BETWEEN '2025-02-10' AND '2025-02-15' AND
+    parameter_id IN (1, 2) -- Only temperature and humidity
+GROUP BY day, parameter_id
+ORDER BY day, parameter_id;
+
+-- Disable chunk skipping again for comparison
+SELECT disable_chunk_skipping('temperature_forecasts', 'forecast_time');
+
+-- Run the same complex query with chunk skipping disabled
+EXPLAIN ANALYZE
+SELECT 
+    date_trunc('day', forecast_time) AS day,
+    parameter_id,
+    avg(value) AS avg_value,
+    min(value) AS min_value,
+    max(value) AS max_value,
+    stddev(value) AS stddev_value,
+    count(*) AS count
+FROM temperature_forecasts
+WHERE 
+    forecast_time BETWEEN '2025-02-10' AND '2025-02-15' AND
+    parameter_id IN (1, 2) -- Only temperature and humidity
+GROUP BY day, parameter_id
+ORDER BY day, parameter_id;
+\timing off
