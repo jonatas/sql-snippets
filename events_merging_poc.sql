@@ -17,13 +17,23 @@ CREATE TABLE events (
     name TEXT NOT NULL,
     start_time TIMESTAMPTZ NOT NULL,
     end_time TIMESTAMPTZ NULL,
-    status TEXT NOT NULL DEFAULT 'active',
+    status TEXT NOT NULL DEFAULT 'working',
     CONSTRAINT events_pkey PRIMARY KEY (time, foreign_id),
-    CONSTRAINT valid_status CHECK (status IN ('active', 'completed', 'cancelled', 'critical', 'priority', 'merged')),
+    CONSTRAINT valid_status CHECK (status IN ('working', 'paused', 'offline', 'maintenance')),
     CONSTRAINT valid_timespan CHECK (end_time IS NULL OR end_time >= start_time)
 );
 
 SELECT create_hypertable('events', by_range('time', INTERVAL '7 days'));
+
+-- New hypertable for sample data around foreign_id
+CREATE TABLE sample_data (
+    time TIMESTAMPTZ NOT NULL,
+    foreign_id TEXT NOT NULL,
+    value DOUBLE PRECISION NOT NULL,
+    CONSTRAINT sample_data_pkey PRIMARY KEY (time, foreign_id)
+);
+
+SELECT create_hypertable('sample_data', by_range('time', INTERVAL '7 days'));
 
 -- Manual overrides and merging logic - separate hypertable for scalability
 CREATE TABLE events_manual (
@@ -38,7 +48,7 @@ CREATE TABLE events_manual (
     override_status TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT events_manual_pkey PRIMARY KEY (time, id),
-    CONSTRAINT valid_override_status CHECK (override_status IS NULL OR override_status IN ('active', 'completed', 'cancelled', 'critical', 'priority', 'merged', 'ultra_priority'))
+    CONSTRAINT valid_override_status CHECK (override_status IS NULL OR override_status IN ('working', 'paused', 'offline', 'maintenance'))
 );
 
 SELECT create_hypertable('events_manual', by_range('time', INTERVAL '1 month'));
@@ -70,11 +80,10 @@ SELECT
     random_start_time as start_time,
     random_start_time + (random() * INTERVAL '29 days') as end_time,
     CASE 
-        WHEN random() < 0.7 THEN 'active'
-        WHEN random() < 0.9 THEN 'completed'
-        WHEN random() < 0.98 THEN 'cancelled'
-        WHEN random() < 0.99 THEN 'priority'
-        ELSE 'critical'
+        WHEN random() < 0.7 THEN 'working'
+        WHEN random() < 0.85 THEN 'paused'
+        WHEN random() < 0.97 THEN 'offline'
+        ELSE 'maintenance'
     END as status
 FROM event_data;
 
@@ -97,10 +106,10 @@ SELECT
     END as notes,
     CASE WHEN random() < 0.5 THEN 'Merged Event ' || (random() * 100)::int ELSE NULL END,
     CASE 
-        WHEN random() < 0.1 THEN 'critical'
-        WHEN random() < 0.2 THEN 'priority' 
-        WHEN random() < 0.3 THEN 'merged'
-        ELSE NULL 
+        WHEN random() < 0.1 THEN 'offline'
+        WHEN random() < 0.2 THEN 'maintenance' 
+        WHEN random() < 0.5 THEN 'paused'
+        ELSE 'working' 
     END
 FROM events e
 CROSS JOIN LATERAL (SELECT replace(e.foreign_id, 'event_', '')::int as event_num) nums
@@ -118,7 +127,7 @@ SELECT
      WHERE event_num + i <= 999000) as merged_event_ids,
     'MEGA MERGE: Large-scale event consolidation' as notes,
     'Ultra Event ' || (random() * 100)::int as override_name,
-    'ultra_priority' as override_status
+    'maintenance' as override_status
 FROM events e
 CROSS JOIN LATERAL (SELECT replace(e.foreign_id, 'event_', '')::int as event_num) nums
 WHERE event_num BETWEEN 1000 AND 3000
@@ -185,5 +194,118 @@ WHERE merged_event_ids IS NOT NULL
 GROUP BY array_length(merged_event_ids, 1)
 ORDER BY merge_size DESC
 LIMIT 10;
+
+-- Exclusion periods for each foreign_id (offline/maintenance)
+CREATE OR REPLACE VIEW event_timeline_exclusions AS
+SELECT
+    foreign_id,
+    start_time,
+    end_time,
+    status
+FROM merged_events
+WHERE status IN ('offline', 'maintenance');
+
+-- Function to get valid (non-excluded) periods for a given foreign_id
+CREATE OR REPLACE FUNCTION get_valid_periods(foreign_id TEXT)
+RETURNS TABLE (start_time TIMESTAMPTZ, end_time TIMESTAMPTZ) AS $$
+BEGIN
+    RETURN QUERY
+    WITH base_periods AS (
+        SELECT start_time, end_time
+        FROM merged_events
+        WHERE foreign_id = get_valid_periods.foreign_id
+          AND status NOT IN ('offline', 'maintenance')
+    ),
+    exclusions AS (
+        SELECT start_time, end_time
+        FROM event_timeline_exclusions
+        WHERE foreign_id = get_valid_periods.foreign_id
+    ),
+    -- Split base periods by exclusions
+    split_periods AS (
+        SELECT b.start_time AS base_start, b.end_time AS base_end, e.start_time AS ex_start, e.end_time AS ex_end
+        FROM base_periods b
+        LEFT JOIN exclusions e
+          ON b.start_time < e.end_time AND b.end_time > e.start_time
+    )
+    SELECT
+        GREATEST(base_start, COALESCE(ex_end, base_start)) AS start_time,
+        LEAST(base_end, COALESCE(ex_start, base_end)) AS end_time
+    FROM split_periods
+    WHERE (ex_start IS NULL OR base_start < ex_start)
+      AND (ex_end IS NULL OR base_end > ex_end)
+      AND GREATEST(base_start, COALESCE(ex_end, base_start)) < LEAST(base_end, COALESCE(ex_start, base_end));
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- Function to get exclusion multirange for efficient filtering
+CREATE OR REPLACE FUNCTION get_exclusion_multirange(foreign_id TEXT)
+RETURNS tstzmultirange AS $$
+DECLARE
+    exclusion_ranges tstzmultirange;
+BEGIN
+    SELECT COALESCE(
+        range_agg(tstzrange(e.start_time, e.end_time))::tstzmultirange,
+        '{}'::tstzmultirange
+    ) INTO exclusion_ranges
+    FROM event_timeline_exclusions e
+    WHERE e.foreign_id = get_exclusion_multirange.foreign_id;
+    
+    RETURN exclusion_ranges;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- Flexible interval function: get all intervals for asset_id and statuses
+CREATE OR REPLACE FUNCTION interval_from(asset_id TEXT, statuses TEXT[])
+RETURNS TABLE (start_time TIMESTAMPTZ, end_time TIMESTAMPTZ, status TEXT) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT m.start_time, m.end_time, m.status
+    FROM merged_events m
+    WHERE m.foreign_id = asset_id
+      AND m.status = ANY(statuses);
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- Generate sample data for testing exclusion logic
+INSERT INTO sample_data (time, foreign_id, value)
+WITH time_series AS (
+    SELECT 
+        generate_series(
+            NOW() - INTERVAL '30 days',
+            NOW(),
+            INTERVAL '1 hour'
+        ) as time_point
+),
+foreign_ids AS (
+    SELECT DISTINCT foreign_id 
+    FROM events 
+    WHERE foreign_id IN ('event_32', 'event_324', 'event_100019', 'event_100031')
+    LIMIT 10
+),
+data_points AS (
+    SELECT 
+        t.time_point as time,
+        f.foreign_id,
+        -- Generate realistic sensor-like values with some noise
+        50 + 20 * sin(extract(epoch from t.time_point) / 86400) + 
+        (random() - 0.5) * 10 as value
+    FROM time_series t
+    CROSS JOIN foreign_ids f
+)
+SELECT time, foreign_id, value
+FROM data_points
+WHERE random() < 0.8; -- 80% data density for realistic gaps
+
+-- Efficient filtered view that excludes offline/maintenance periods
+CREATE OR REPLACE VIEW filtered_sample_data AS
+SELECT 
+    s.time,
+    s.foreign_id,
+    s.value
+FROM sample_data s
+WHERE NOT (
+    get_exclusion_multirange(s.foreign_id) @> s.time
+);
 
 \timing off
