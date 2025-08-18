@@ -7,7 +7,10 @@
 -- Instead of using refresh_continuous_aggregates, now you can refresh partial aggregates automatically
 -- 
 -- Schedule automatic processing:
--- SELECT schedule_invalidation_job('30 seconds', 10);
+-- SELECT add_job('process_flexible_invalidation_job',
+--  schedule_interval => '30 seconds',
+--  fixed_schedule => true,
+--  config => '{"batch_limit": 10}'); 
 --
 -- Manual processing:
 -- CALL process_flexible_invalidation_job(0, '{"batch_limit": 10}');
@@ -454,10 +457,7 @@ DECLARE
 BEGIN
     -- Extract configuration parameters with defaults
     batch_limit := COALESCE((config->>'batch_limit')::INTEGER, 10);
-    max_age := COALESCE((config->>'max_age')::INTERVAL, '1 hour'::INTERVAL);
     
-    -- RAISE NOTICE 'Processing invalidation job (job_id: %, batch_limit: %, max_age: %)', 
-                 job_id, batch_limit, max_age;
     FOR log_rec IN 
         SELECT * FROM flexible_invalidation_log 
         WHERE status = 'pending'
@@ -519,38 +519,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Function to schedule the invalidation processing job
-CREATE OR REPLACE FUNCTION schedule_invalidation_job(
-    p_interval INTERVAL DEFAULT '30 seconds',
-    p_batch_limit INTEGER DEFAULT 10,
-    p_cagg_filter TEXT DEFAULT NULL,
-    p_fixed_schedule BOOLEAN DEFAULT true
-) RETURNS INTEGER AS $$
-DECLARE
-    job_config JSONB;
-    job_id INTEGER;
-BEGIN
-    -- Build job configuration
-    job_config := jsonb_build_object(
-        'batch_limit', p_batch_limit,
-        'max_age', '1 hour',
-        'cagg_filter', p_cagg_filter
-    );
-    
-    -- Schedule the job
-    SELECT add_job(
-        'process_flexible_invalidation_job',
-        p_interval,
-        config => job_config,
-        fixed_schedule => p_fixed_schedule
-    ) INTO job_id;
-    
-    RAISE NOTICE 'Scheduled invalidation processing job with ID % (interval: %, batch_limit: %)', 
-                 job_id, p_interval, p_batch_limit;
-    
-    RETURN job_id;
-END;
-$$ LANGUAGE plpgsql;
+   
 
 -- Function to build upsert query for continuous aggregate using catalog metadata
 CREATE OR REPLACE FUNCTION upsert_query_for(
@@ -601,24 +570,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 
--- Status monitoring function
-CREATE OR REPLACE FUNCTION get_invalidation_status()
-RETURNS TABLE(
-    status invalidation_status,
-    count BIGINT,
-    oldest_pending TIMESTAMPTZ
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT 
-        l.status,
-        COUNT(*) as count,
-        MIN(l.created_at) as oldest_pending
-    FROM flexible_invalidation_log l
-    GROUP BY l.status
-    ORDER BY l.status;
-END;
-$$ LANGUAGE plpgsql;
+
 
 -- Demo: Enable comprehensive partial refresh (INSERT/UPDATE/DELETE)
 SELECT enable_partial_refresh('metrics_cagg', 'tag_id', '1 hour');
@@ -640,27 +592,11 @@ WHERE tag_id = 100 AND device_id = 'device_1';
 DELETE FROM metrics WHERE tag_id = 300;
 
 -- Schedule the invalidation processing job to run every 30 seconds
-SELECT schedule_invalidation_job(
-    p_interval => '30 seconds',
-    p_batch_limit => 10,
-    p_cagg_filter => NULL,  -- Process all CAGGs
-    p_fixed_schedule => true
-) as scheduled_job_id;
+SELECT add_job('process_flexible_invalidation_job',
+  schedule_interval => '30 seconds',
+  fixed_schedule => true,
+  config => '{"batch_limit": 10}'); 
 
--- Wait a moment for the job to process invalidations
-SELECT pg_sleep(2);
-
--- Manually trigger one round of processing for immediate demo results
-CALL process_flexible_invalidation_job(0, '{"batch_limit": 10, "max_age": "1 hour"}');
-
--- Show results
-SELECT 'System Status:' as info;
-SELECT * FROM get_invalidation_status();
-SELECT 'Active Configurations:' as info;
-SELECT cagg_name, partition_column, minimal_window FROM cagg_configurations;
-SELECT 'Scheduled Jobs Status:' as info;
-SELECT 'Job successfully scheduled - check TimescaleDB jobs table' as message;
-SELECT 'Recent Invalidation Entries:' as info;
 SELECT 
     cagg_name, 
     partition_values, 
@@ -676,10 +612,3 @@ FROM flexible_invalidation_log
 ORDER BY created_at DESC 
 LIMIT 10;
 
--- Show results
-SELECT 'System Status:' as info;
-SELECT * FROM get_invalidation_status();
-SELECT 'Active Configurations:' as info;
-SELECT cagg_name, partition_column, minimal_window FROM cagg_configurations;
-
-SELECT 'Complete deployment successful!' as status;
