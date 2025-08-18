@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  timescaledb:
+    image: timescale/timescaledb-ha:pg17.4-ts2.21.3-all
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+volumes:
+  timescale_data:
